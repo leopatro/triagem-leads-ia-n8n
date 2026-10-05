@@ -1,89 +1,51 @@
 Triagem de Leads Comerciais com IA
 
-Automação que recebe leads comerciais (via formulário ou API), usa um LLM para classificar prioridade e categoria, aplica validação de segurança contra prompt injection, notifica o time comercial e registra tudo de forma estruturada — com tratamento de erro em cada ponto de falha possível.
+Automação que recebe leads comerciais, usa um LLM para classificar prioridade e categoria, valida as mensagens contra tentativas de manipulação de prompt, notifica o time comercial e registra tudo de forma estruturada numa planilha.
 
-Não é um projeto tecnicamente complexo. É um fluxo simples de automação com IA, construído com o cuidado que normalmente só se vê em sistemas de produção: validação de entrada, resiliência a falhas, e rastreabilidade. A maioria das automações que vejo por aí não tem nem isso.
+Não é um projeto tecnicamente complexo. É um fluxo simples de automação com IA, construído com o cuidado que normalmente só se vê em sistemas pensados para produção: validação de entrada, resiliência a falhas e rastreabilidade. A maioria das automações que vejo por aí não tem nem isso.
 
-Problema de negócio
+O problema
 
-Times comerciais recebem leads por múltiplos canais (formulário do site, WhatsApp, planilhas manuais) sem padronização de triagem. O resultado comum: leads urgentes demoram para ser vistos, leads de baixo interesse consomem tempo da mesma forma que leads quentes, e não existe registro estruturado para medir volume, origem ou tempo de resposta.
+Times comerciais recebem leads por vários canais — formulário do site, WhatsApp, planilha manual — sem nenhuma padronização de triagem. Na prática, isso significa que um lead urgente pode ficar esperando o mesmo tempo que um lead só curioso, e ninguém tem um registro confiável de volume, origem ou tempo de resposta.
 
-Solução
+Como funciona
 
-Um pipeline de automação que:
+O lead entra pelo formulário (pensado para demonstração visual) ou por um webhook, para quem quiser integrar via API. Os dois caminhos convergem no mesmo pipeline.
 
-Recebe o lead por formulário (demo visual) ou webhook (integração via API).
-Valida a mensagem contra tamanho excessivo e padrões de manipulação de prompt antes de qualquer chamada de IA.
-Envia os dados para um LLM (Groq, modelo openai/gpt-oss-120b), que classifica prioridade (alta/média/baixa), categoria e gera um resumo com justificativa.
-Roteia o lead por prioridade, disparando e-mail de confirmação ao lead e, quando a prioridade é alta, um alerta imediato ao time comercial com a justificativa da IA incluída (transparência da decisão).
-Registra todos os leads processados em uma planilha, com status de cada etapa — inclusive os rejeitados na validação e os que falharam na chamada de API.
-Arquitetura
-┌─────────────┐     ┌─────────────┐
-│ Form Trigger│     │   Webhook   │
-└──────┬──────┘     └──────┬──────┘
-       └──────────┬────────┘
-                   ▼
-          ┌─────────────────┐
-          │ Validar Mensagem│  (sanitização + anti prompt-injection)
-          └────────┬────────┘
-                   ▼
-              ┌────────┐
-              │   If   │── false ──▶ Rejeitado (log)
-              └───┬────┘
-          true    │
-      ┌───────────┴────────────┐
-      ▼                        ▼
-┌──────────┐           ┌───────────────┐
-│ E-mail   │           │  HTTP Request │── error ──▶ Erro API (log)
-│confirmação│          │ (Groq LLM)    │
-└──────────┘           └───────┬───────┘
-                      success  ▼
-                        ┌─────────────┐
-                        │Extrai campos│
-                        └──────┬──────┘
-                               ▼
-                          ┌─────────┐
-                          │ Switch  │── alta/média/baixa/erro_classificação
-                          └────┬────┘
-                   alta        │
-              ┌────────────────┼──────────────┐
-              ▼                                ▼
-      ┌───────────────┐              ┌──────────────────┐
-      │ Alerta interno│              │ Registro estrutu- │
-      │  (e-mail)     │              │ rado (Sheets)     │
-      └───────────────┘              └──────────────────┘
+Antes de qualquer coisa, a mensagem passa por uma validação: ela checa o tamanho do texto e procura por padrões conhecidos de tentativa de manipular o prompt da IA — afinal, é um campo de texto livre vindo de um formulário público, e isso é exatamente o tipo de entrada que merece desconfiança.
+
+Se a mensagem é válida, duas coisas acontecem em paralelo: o lead recebe um e-mail de confirmação na hora, e os dados seguem para a IA (rodando na Groq, modelo openai/gpt-oss-120b), que analisa o conteúdo e devolve uma prioridade (alta, média ou baixa), uma categoria, um resumo e a justificativa da decisão.
+
+A partir daí, o lead é roteado conforme a prioridade. Todo lead processado vai para uma planilha, com todos os campos e o status de cada etapa. Quando a prioridade é alta, além do registro, dispara um e-mail de alerta para o time comercial — incluindo a justificativa que a IA deu, para que quem recebe o alerta entenda o motivo da urgência, não só o resultado.
+
+Se a chamada à IA falhar por qualquer motivo (limite de requisições, timeout, chave expirada), o lead não se perde: ele cai numa rota de erro separada, registrada para reprocessamento depois, em vez de travar o fluxo inteiro.
+
 Tecnologias
-n8n (self-hosted via Docker) — orquestração
-Groq API (openai/gpt-oss-120b) — classificação via LLM
-JavaScript (node Code) — parsing, validação e normalização de dados
-Google Sheets API — registro estruturado
-Gmail API — notificações
-Docker — ambiente isolado e reprodutível
-Decisões técnicas e por quê
 
-HTTP Request genérico em vez de node nativo de IA: escolhido deliberadamente para demonstrar entendimento de como uma chamada de API de LLM funciona por baixo (estrutura de mensagens, roles, temperatura), em vez de depender de uma integração pronta que abstrai esse conhecimento.
+n8n rodando via Docker, Groq API para a classificação via LLM, JavaScript nos nodes de código para parsing e validação, Google Sheets para o registro e Gmail para as notificações.
 
-Validação contra prompt injection antes da chamada à IA: o campo de mensagem vem de um formulário público — texto livre de usuário indo direto para o prompt é um vetor clássico de manipulação. A validação implementada (limite de tamanho + regex contra padrões conhecidos) não é uma solução completa — é uma primeira camada de defesa. Defesa robusta de verdade também depende de isolar o system prompt do input do usuário na própria estrutura da API (já feito aqui, com role: system separado de role: user) e, em produção real, um classificador dedicado revisando o input antes do processamento principal.
+Algumas decisões que valem explicar
 
-Switch com fallback output: como a IA é probabilística, nada garante que sempre devolva exatamente alta, media ou baixa no formato esperado. O fallback captura qualquer resposta fora do padrão em vez de deixar o lead desaparecer silenciosamente do fluxo.
+Optei por usar um node de HTTP Request genérico para chamar a IA, em vez de uma integração pronta — queria entender e mostrar como uma chamada de API de LLM funciona por baixo dos panos (estrutura de mensagens, roles, temperatura), não só consumir algo já abstraído.
 
-Continue on Fail no HTTP Request: sem isso, uma falha na API da Groq (rate limit, timeout, chave expirada) travaria o workflow inteiro e o lead se perderia sem rastro. Com a saída de erro dedicada, a falha é registrada e pode ser reprocessada.
+A validação contra manipulação de prompt é só uma primeira camada, não uma solução definitiva — isso é importante deixar claro. Ela pega tentativas óbvias, mas defesa de verdade também depende de manter o system prompt isolado do input do usuário (o que já faço aqui) e, num cenário de produção real, provavelmente envolveria um segundo modelo revisando as entradas antes do processamento principal.
 
-Suporte a dois formatos de entrada (Form e Webhook): o n8n entrega os dados de formas diferentes dependendo do trigger (campos na raiz do JSON vs. aninhados em body). O node de validação normaliza os dois formatos em um só ponto, mantendo o resto do pipeline agnóstico à origem do dado.
+O roteamento por prioridade tem uma quarta saída, além de alta/média/baixa, para qualquer resposta da IA que fuja do padrão esperado — porque modelo de linguagem é probabilístico, e nada garante que ele sempre devolva exatamente o que você pediu no formato que você pediu.
 
-Limitações conhecidas
-Não há validação de schema na resposta da IA: se o modelo devolver um JSON malformado, o JSON.parse falha sem tratamento específico (ficaria dentro do fluxo de erro genérico, mas sem diagnóstico direcionado).
-Sem observabilidade real: o projeto registra o resultado de cada execução, mas não monitora latência, custo por execução ou taxa de erro ao longo do tempo.
-Escopo de um único caso de uso — não há reuso de componentes entre múltiplos fluxos.
-A defesa contra prompt injection é básica (regex), não uma solução robusta de produção.
-Como rodar
+Também reparei, construindo isso, que o formulário e o webhook entregam os dados em formatos diferentes (um na raiz do JSON, outro aninhado dentro de body). A normalização desses dois formatos acontece num único ponto do fluxo, para que o resto do pipeline não precise se preocupar com a origem do dado.
+
+O que ainda falta
+
+Não tem validação de schema na resposta da IA — se o modelo devolver um JSON malformado, o parse simplesmente falha, sem um tratamento específico para esse caso. Também não tem observabilidade de verdade: o projeto registra o resultado de cada lead, mas não acompanha latência, custo por execução ou taxa de erro ao longo do tempo. E é, no fim das contas, um único caso de uso — não há reuso de componentes entre fluxos diferentes.
+
+Para rodar
+
 Suba o n8n via Docker:
-   docker run -d --name n8n -p 5678:5678 -v n8n_data:/home/node/.n8n -e GROQ_API_KEY="SUA_CHAVE_AQUI" -e N8N_BLOCK_ENV_ACCESS_IN_NODE=false docker.n8n.io/n8nio/n8n
-Importe o arquivo workflow/triagem-leads-ia-n8n-groq.json no n8n.
-Crie uma chave de API gratuita em console.groq.com.
-Crie uma planilha Google com as colunas: Data, Nome, Email, Empresa, Mensagem, Prioridade, Categoria, Resumo, Status, e conecte via credencial OAuth do Google Sheets no node correspondente.
-Conecte uma credencial OAuth do Gmail para os nodes de e-mail, e ajuste o destinatário do alerta interno.
-Ative o workflow e teste via formulário ou enviando um POST para o endpoint do Webhook.
+
+docker run -d --name n8n -p 5678:5678 -v n8n_data:/home/node/.n8n -e GROQ_API_KEY="SUA_CHAVE_AQUI" -e N8N_BLOCK_ENV_ACCESS_IN_NODE=false docker.n8n.io/n8nio/n8n
+
+Importe o arquivo triagem-leads-ia-n8n-groq.json no n8n, crie uma chave gratuita em console.groq.com, configure uma planilha Google com as colunas Data, Nome, Email, Empresa, Mensagem, Prioridade, Categoria, Resumo e Status, e conecte suas próprias credenciais do Google Sheets e Gmail nos nodes correspondentes.
+
 Autor
 
 Leonardo Patro — github.com/leopatro
